@@ -62,14 +62,6 @@ def parse_listing_page(html: str) -> List[str]:
 
 def parse_total_pages(html: str) -> Optional[int]:
     soup = BeautifulSoup(html, "lxml")
-    paging = soup.select_one("#pagingDiv")
-    if paging:
-        page_links = paging.select("a[href*='pn=']")
-        if page_links:
-            last_href = page_links[-1].get("href", "")
-            match = re.search(r"pn=(\d+)", last_href)
-            if match:
-                return int(match.group(1))
 
     count_all = soup.select_one("#hdncountAll")
     count_from = soup.select_one("#hdncountFrom")
@@ -82,7 +74,14 @@ def parse_total_pages(html: str) -> Optional[int]:
         if total > 0:
             return (total + per_page - 1) // per_page
     except (ValueError, TypeError, KeyError):
-        return None
+        pass
+
+    paging = soup.select_one("#pagingDiv")
+    if paging:
+        pn_values = [int(m.group(1)) for m in re.finditer(r"pn=(\d+)", str(paging))]
+        if pn_values:
+            return max(pn_values)
+
     return None
 
 
@@ -237,12 +236,13 @@ def scrape_all() -> None:
     month = run_date.strftime("%m")
     day = run_date.strftime("%d")
     s3_prefix = f"motorgy/year={year}/month={month}/day={day}"
-    max_pages = int(get_env("MAX_PAGES", required=False, default="50"))
+    max_pages_env = get_env("MAX_PAGES", required=False, default=None)
+    max_pages = int(max_pages_env) if max_pages_env else None
     delay_seconds = float(get_env("REQUEST_DELAY_SECONDS", required=False, default="1.0"))
 
     print("Starting Motorgy scrape...")
     logger.info("Run date (UTC): %s-%s-%s", year, month, day)
-    logger.info("Max pages: %s | Delay seconds: %s", max_pages, delay_seconds)
+    logger.info("Max pages: %s | Delay seconds: %s", max_pages or "ALL", delay_seconds)
 
     s3_client = boto3.client(
         "s3",
@@ -263,7 +263,8 @@ def scrape_all() -> None:
         return
 
     total_pages = parse_total_pages(first_resp.text) or 1
-    total_pages = min(total_pages, max_pages)
+    if max_pages:
+        total_pages = min(total_pages, max_pages)
     print(f"Total pages detected: {total_pages}")
     logger.info("Total pages detected: %s", total_pages)
 
