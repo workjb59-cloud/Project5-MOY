@@ -124,9 +124,10 @@ def parse_features(soup: BeautifulSoup) -> Dict[str, List[str]]:
     return features
 
 
-def parse_inspection(soup: BeautifulSoup) -> Tuple[str, str]:
+def parse_inspection(soup: BeautifulSoup) -> Tuple[str, str, List[str]]:
     date_text = ""
     summary_text = ""
+    mechanical_statuses: List[str] = []
     inspection = soup.select_one("#_inspection")
     if inspection:
         descriptions = [
@@ -136,7 +137,13 @@ def parse_inspection(soup: BeautifulSoup) -> Tuple[str, str]:
             date_text = descriptions[0]
             if len(descriptions) > 1:
                 summary_text = " ".join(descriptions[1:])
-    return date_text, summary_text
+        mechanical_header = inspection.select_one(".row h5")
+        if mechanical_header and "الحالة الميكانيكية" in extract_text(mechanical_header):
+            for status in inspection.select(".web-text-end span .color_title"):
+                status_text = extract_text(status)
+                if status_text:
+                    mechanical_statuses.append(status_text)
+    return date_text, summary_text, mechanical_statuses
 
 
 def parse_description(soup: BeautifulSoup) -> str:
@@ -203,7 +210,7 @@ def scrape_detail(session: requests.Session, url: str) -> Dict[str, object]:
     price, monthly = parse_price_block(soup)
     specs = parse_specs(soup)
     features = parse_features(soup)
-    inspection_date, inspection_summary = parse_inspection(soup)
+    inspection_date, inspection_summary, mechanical_statuses = parse_inspection(soup)
     description = parse_description(soup)
     images = extract_image_urls(soup)
 
@@ -217,6 +224,7 @@ def scrape_detail(session: requests.Session, url: str) -> Dict[str, object]:
         "features": features,
         "inspection_date": inspection_date,
         "inspection_summary": inspection_summary,
+        "mechanical_statuses": mechanical_statuses,
         "description": description,
         "image_urls": images,
     }
@@ -319,6 +327,7 @@ def scrape_all() -> None:
             **data,
             "specs_json": json.dumps(data.get("specs", {}), ensure_ascii=False),
             "features_json": json.dumps(data.get("features", {}), ensure_ascii=False),
+            "mechanical_statuses_json": json.dumps(data.get("mechanical_statuses", []), ensure_ascii=False),
             "s3_images_paths": json.dumps(s3_image_paths, ensure_ascii=False),
             "images_count": len(s3_image_paths),
         }
