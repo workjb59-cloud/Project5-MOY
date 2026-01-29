@@ -1,0 +1,272 @@
+import json
+import os
+import re
+import time
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urljoin, urlparse
+
+import boto3
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+
+BASE_URL = "https://www.motorgy.com"
+USED_CARS_URL = "https://www.motorgy.com/ar/used-cars"
+
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+}
+
+
+def get_env(name: str, required: bool = True, default: Optional[str] = None) -> Optional[str]:
+    value = os.getenv(name, default)
+    if required and not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_text(el) -> str:
+    if not el:
+        return ""
+    return normalize_text(el.get_text(" ", strip=True))
+
+
+def absolute_url(href: str) -> str:
+    return urljoin(BASE_URL, href)
+
+
+def parse_listing_page(html: str) -> List[str]:
+    soup = BeautifulSoup(html, "lxml")
+    links = []
+    for card in soup.select("div.car-card"):
+        a = card.select_one("a[href*='/ar/car-details/']")
+        if a and a.get("href"):
+            links.append(absolute_url(a["href"]))
+    return list(dict.fromkeys(links))
+
+
+def parse_price_block(soup: BeautifulSoup) -> Tuple[str, str]:
+    price = ""
+    monthly = ""
+    side_box = soup.select_one(".side-box")
+    if side_box:
+        price_el = side_box.select_one("h4")
+        price = extract_text(price_el)
+        monthly_el = side_box.select_one(".side p.fs-12")
+        monthly = extract_text(monthly_el)
+    return price, monthly
+
+
+def parse_specs(soup: BeautifulSoup) -> Dict[str, str]:
+    specs = {}
+    for row in soup.select("#_specefication .data-table__row"):
+        key = extract_text(row.select_one("p"))
+        value = extract_text(row.select_one("span"))
+        if key:
+            specs[key] = value
+    return specs
+
+
+def parse_features(soup: BeautifulSoup) -> Dict[str, List[str]]:
+    features: Dict[str, List[str]] = {}
+    for item in soup.select("#_features .accordion-item"):
+        section_title = extract_text(item.select_one(".accordion-button"))
+        if not section_title:
+            continue
+        items = [
+            extract_text(p)
+            for p in item.select(".features-table__row p")
+            if extract_text(p)
+        ]
+        if items:
+            features[section_title] = items
+    return features
+
+
+def parse_inspection(soup: BeautifulSoup) -> Tuple[str, str]:
+    date_text = ""
+    summary_text = ""
+    inspection = soup.select_one("#_inspection")
+    if inspection:
+        descriptions = [
+            extract_text(p) for p in inspection.select(".pack-box__side .description")
+        ]
+        if descriptions:
+            date_text = descriptions[0]
+            if len(descriptions) > 1:
+                summary_text = " ".join(descriptions[1:])
+    return date_text, summary_text
+
+
+def parse_description(soup: BeautifulSoup) -> str:
+    return extract_text(soup.select_one("#_description .description"))
+
+
+def parse_basic_info(soup: BeautifulSoup) -> Tuple[str, str, str]:
+    title = extract_text(soup.select_one(".side-box h5"))
+    year = ""
+    mileage = ""
+    model = soup.select_one(".side-box .car-model")
+    if model:
+        year = extract_text(model.select_one(".highlight"))
+        spans = model.find_all("span")
+        if len(spans) > 1:
+            mileage = extract_text(spans[1])
+    return title, year, mileage
+
+
+def extract_image_urls(soup: BeautifulSoup) -> List[str]:
+    urls = set()
+    for slide in soup.select(".slider-box .swiper-slide"):
+        for attr in ("data-src", "data-background"):
+            val = slide.get(attr)
+            if val:
+                urls.add(val)
+        style = slide.get("style", "")
+        match = re.search(r"background-image:\s*url\([\"']?(.*?)[\"']?\)", style)
+        if match:
+            urls.add(match.group(1))
+    for thumb in soup.select(".details-group__thumbnails a[data-src]"):
+        urls.add(thumb.get("data-src"))
+    return [u for u in urls if u]
+
+
+def parse_ad_id(url: str) -> str:
+    path = urlparse(url).path.rstrip("/")
+    last = path.split("/")[-1]
+    return re.sub(r"\D", "", last) or last
+
+
+def file_extension_from_url(url: str) -> str:
+    path = urlparse(url).path
+    ext = os.path.splitext(path)[1]
+    return ext if ext else ".jpg"
+
+
+def download_image(session: requests.Session, url: str) -> bytes:
+    resp = session.get(url, timeout=30)
+    resp.raise_for_status()
+    return resp.content
+
+
+def upload_bytes_to_s3(s3_client, bucket: str, key: str, content: bytes, content_type: str = "image/jpeg"):
+    s3_client.put_object(Bucket=bucket, Key=key, Body=content, ContentType=content_type)
+
+
+def scrape_detail(session: requests.Session, url: str) -> Dict[str, object]:
+    resp = session.get(url, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "lxml")
+
+    title, year, mileage = parse_basic_info(soup)
+    price, monthly = parse_price_block(soup)
+    specs = parse_specs(soup)
+    features = parse_features(soup)
+    inspection_date, inspection_summary = parse_inspection(soup)
+    description = parse_description(soup)
+    images = extract_image_urls(soup)
+
+    return {
+        "title": title,
+        "year": year,
+        "mileage": mileage,
+        "price": price,
+        "monthly_estimate": monthly,
+        "specs": specs,
+        "features": features,
+        "inspection_date": inspection_date,
+        "inspection_summary": inspection_summary,
+        "description": description,
+        "image_urls": images,
+    }
+
+
+def scrape_all() -> None:
+    bucket = get_env("S3_BUCKET")
+    s3_prefix = "motorgy"
+    max_pages = int(get_env("MAX_PAGES", required=False, default="50"))
+    delay_seconds = float(get_env("REQUEST_DELAY_SECONDS", required=False, default="1.0"))
+
+    s3_client = boto3.client(
+        "s3",
+        aws_access_key_id=get_env("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=get_env("AWS_SECRET_ACCESS_KEY"),
+        region_name="us-east-1",
+    )
+
+    session = requests.Session()
+    session.headers.update(DEFAULT_HEADERS)
+
+    all_links: List[str] = []
+    page = 1
+    while page <= max_pages:
+        page_url = f"{USED_CARS_URL}?page={page}"
+        resp = session.get(page_url, timeout=30)
+        if resp.status_code != 200:
+            break
+        links = parse_listing_page(resp.text)
+        if not links:
+            break
+        new_links = [l for l in links if l not in all_links]
+        if not new_links:
+            break
+        all_links.extend(new_links)
+        page += 1
+        time.sleep(delay_seconds)
+
+    results: List[Dict[str, object]] = []
+    for idx, detail_url in enumerate(all_links, start=1):
+        ad_id = parse_ad_id(detail_url)
+        data = scrape_detail(session, detail_url)
+        image_urls = data.pop("image_urls", [])
+
+        s3_image_paths = []
+        for img_index, img_url in enumerate(image_urls, start=1):
+            try:
+                ext = file_extension_from_url(img_url)
+                filename = f"{img_index:02d}{ext}"
+                key = f"{s3_prefix}/images/{ad_id}/{filename}"
+                content = download_image(session, img_url)
+                content_type = "image/jpeg"
+                if ext.lower() in {".png"}:
+                    content_type = "image/png"
+                upload_bytes_to_s3(s3_client, bucket, key, content, content_type)
+                s3_image_paths.append(f"s3://{bucket}/{key}")
+            except Exception:
+                continue
+
+        row = {
+            "ad_id": ad_id,
+            "detail_url": detail_url,
+            **data,
+            "specs_json": json.dumps(data.get("specs", {}), ensure_ascii=False),
+            "features_json": json.dumps(data.get("features", {}), ensure_ascii=False),
+            "s3_images_paths": json.dumps(s3_image_paths, ensure_ascii=False),
+            "images_count": len(s3_image_paths),
+        }
+        results.append(row)
+
+        if idx % 5 == 0:
+            time.sleep(delay_seconds)
+
+    df = pd.DataFrame(results)
+    output_dir = os.path.join(os.getcwd(), "output")
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%d")
+    excel_name = f"motorgy_used_cars_{timestamp}.xlsx"
+    excel_path = os.path.join(output_dir, excel_name)
+    df.to_excel(excel_path, index=False)
+
+    excel_key = f"{s3_prefix}/exports/{excel_name}"
+    s3_client.upload_file(excel_path, bucket, excel_key)
+
+
+if __name__ == "__main__":
+    scrape_all()
