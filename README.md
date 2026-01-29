@@ -14,13 +14,13 @@ Monthly scraper for Motorgy used cars listings. It collects ad details, download
 The Excel export is uploaded to:
 
 ```
-s3://<S3_BUCKET>/motorgy/exports/motorgy_used_cars_<YYYYMMDD>.xlsx
+s3://<S3_BUCKET>/motorgy/year=<YYYY>/month=<MM>/day=<DD>/excel_files/motorgy_used_cars_<YYYYMMDD>.xlsx
 ```
 
 Images are uploaded to:
 
 ```
-s3://<S3_BUCKET>/motorgy/images/<ad_id>/<nn>.<ext>
+s3://<S3_BUCKET>/motorgy/year=<YYYY>/month=<MM>/day=<DD>/images/<ad_id>/<nn>.<ext>
 ```
 
 ## Data Columns
@@ -54,7 +54,7 @@ Dependencies are listed in `requirements.txt`.
 ```
 AWS_ACCESS_KEY_ID=<your-access-key>
 AWS_SECRET_ACCESS_KEY=<your-secret-key>
-S3_BUCKET_NAME=<your-bucket-name>
+S3_BUCKET=<your-bucket-name>
 ```
 
 Optional environment variables:
@@ -78,7 +78,7 @@ The workflow runs on the 1st of every month at 03:00 UTC.
 Required GitHub Secrets:
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
-- `S3_BUCKET_NAME`
+- `S3_BUCKET`
 
 You can also run it manually from the Actions tab.
 

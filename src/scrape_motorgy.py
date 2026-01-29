@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import time
@@ -19,6 +20,13 @@ DEFAULT_HEADERS = {
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
 }
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 def get_env(name: str, required: bool = True, default: Optional[str] = None) -> Optional[str]:
@@ -50,6 +58,32 @@ def parse_listing_page(html: str) -> List[str]:
         if a and a.get("href"):
             links.append(absolute_url(a["href"]))
     return list(dict.fromkeys(links))
+
+
+def parse_total_pages(html: str) -> Optional[int]:
+    soup = BeautifulSoup(html, "lxml")
+    paging = soup.select_one("#pagingDiv")
+    if paging:
+        page_links = paging.select("a[href*='pn=']")
+        if page_links:
+            last_href = page_links[-1].get("href", "")
+            match = re.search(r"pn=(\d+)", last_href)
+            if match:
+                return int(match.group(1))
+
+    count_all = soup.select_one("#hdncountAll")
+    count_from = soup.select_one("#hdncountFrom")
+    count_to = soup.select_one("#hdncountTo")
+    try:
+        total = int(count_all["value"]) if count_all and count_all.get("value") else 0
+        start = int(count_from["value"]) if count_from and count_from.get("value") else 0
+        end = int(count_to["value"]) if count_to and count_to.get("value") else 0
+        per_page = max(1, end - start + 1)
+        if total > 0:
+            return (total + per_page - 1) // per_page
+    except (ValueError, TypeError, KeyError):
+        return None
+    return None
 
 
 def parse_price_block(soup: BeautifulSoup) -> Tuple[str, str]:
@@ -190,9 +224,17 @@ def scrape_detail(session: requests.Session, url: str) -> Dict[str, object]:
 
 def scrape_all() -> None:
     bucket = get_env("S3_BUCKET")
-    s3_prefix = "motorgy"
+    run_date = datetime.utcnow()
+    year = run_date.strftime("%Y")
+    month = run_date.strftime("%m")
+    day = run_date.strftime("%d")
+    s3_prefix = f"motorgy/year={year}/month={month}/day={day}"
     max_pages = int(get_env("MAX_PAGES", required=False, default="50"))
     delay_seconds = float(get_env("REQUEST_DELAY_SECONDS", required=False, default="1.0"))
+
+    print("Starting Motorgy scrape...")
+    logger.info("Run date (UTC): %s-%s-%s", year, month, day)
+    logger.info("Max pages: %s | Delay seconds: %s", max_pages, delay_seconds)
 
     s3_client = boto3.client(
         "s3",
@@ -206,25 +248,53 @@ def scrape_all() -> None:
 
     all_links: List[str] = []
     page = 1
-    while page <= max_pages:
-        page_url = f"{USED_CARS_URL}?page={page}"
+    first_page_url = f"{USED_CARS_URL}?pn=1"
+    first_resp = session.get(first_page_url, timeout=30)
+    if first_resp.status_code != 200:
+        logger.error("Failed to load first page: %s (status %s)", first_page_url, first_resp.status_code)
+        return
+
+    total_pages = parse_total_pages(first_resp.text) or 1
+    total_pages = min(total_pages, max_pages)
+    print(f"Total pages detected: {total_pages}")
+    logger.info("Total pages detected: %s", total_pages)
+
+    first_links = parse_listing_page(first_resp.text)
+    all_links.extend(first_links)
+    logger.info("Page 1 links: %s", len(first_links))
+
+    page = 2
+    while page <= total_pages:
+        page_url = f"{USED_CARS_URL}?pn={page}"
         resp = session.get(page_url, timeout=30)
         if resp.status_code != 200:
+            logger.warning("Failed page %s: %s (status %s)", page, page_url, resp.status_code)
             break
         links = parse_listing_page(resp.text)
         if not links:
+            logger.warning("No links found on page %s", page)
             break
         new_links = [l for l in links if l not in all_links]
         if not new_links:
-            break
+            page += 1
+            time.sleep(delay_seconds)
+            continue
         all_links.extend(new_links)
+        logger.info("Page %s new links: %s", page, len(new_links))
         page += 1
         time.sleep(delay_seconds)
 
+    logger.info("Total unique ads: %s", len(all_links))
+
     results: List[Dict[str, object]] = []
     for idx, detail_url in enumerate(all_links, start=1):
+        logger.info("Scraping ad %s/%s: %s", idx, len(all_links), detail_url)
         ad_id = parse_ad_id(detail_url)
-        data = scrape_detail(session, detail_url)
+        try:
+            data = scrape_detail(session, detail_url)
+        except Exception as exc:
+            logger.warning("Failed to scrape detail %s: %s", detail_url, exc)
+            continue
         image_urls = data.pop("image_urls", [])
 
         s3_image_paths = []
@@ -239,7 +309,8 @@ def scrape_all() -> None:
                     content_type = "image/png"
                 upload_bytes_to_s3(s3_client, bucket, key, content, content_type)
                 s3_image_paths.append(f"s3://{bucket}/{key}")
-            except Exception:
+            except Exception as exc:
+                logger.warning("Image upload failed (%s): %s", img_url, exc)
                 continue
 
         row = {
@@ -253,19 +324,26 @@ def scrape_all() -> None:
         }
         results.append(row)
 
+        if idx % 10 == 0:
+            logger.info("Progress: %s/%s ads", idx, len(all_links))
+
         if idx % 5 == 0:
             time.sleep(delay_seconds)
 
     df = pd.DataFrame(results)
     output_dir = os.path.join(os.getcwd(), "output")
     os.makedirs(output_dir, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%d")
+    timestamp = run_date.strftime("%Y%m%d")
     excel_name = f"motorgy_used_cars_{timestamp}.xlsx"
     excel_path = os.path.join(output_dir, excel_name)
     df.to_excel(excel_path, index=False)
+    print(f"Excel saved: {excel_path}")
+    logger.info("Excel saved: %s", excel_path)
 
-    excel_key = f"{s3_prefix}/exports/{excel_name}"
+    excel_key = f"{s3_prefix}/excel_files/{excel_name}"
     s3_client.upload_file(excel_path, bucket, excel_key)
+    logger.info("Excel uploaded to s3://%s/%s", bucket, excel_key)
+    print("Scrape complete.")
 
 
 if __name__ == "__main__":
