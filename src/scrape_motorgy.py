@@ -123,10 +123,10 @@ def parse_features(soup: BeautifulSoup) -> Dict[str, List[str]]:
     return features
 
 
-def parse_inspection(soup: BeautifulSoup) -> Tuple[str, str, List[str]]:
+def parse_inspection(soup: BeautifulSoup) -> Tuple[str, str, Dict[str, Dict[str, str]]]:
     date_text = ""
     summary_text = ""
-    mechanical_statuses: List[str] = []
+    report: Dict[str, Dict[str, str]] = {}
     inspection = soup.select_one("#_inspection")
     if inspection:
         descriptions = [
@@ -136,13 +136,22 @@ def parse_inspection(soup: BeautifulSoup) -> Tuple[str, str, List[str]]:
             date_text = descriptions[0]
             if len(descriptions) > 1:
                 summary_text = " ".join(descriptions[1:])
-        mechanical_header = inspection.select_one(".row h5")
-        if mechanical_header and "الحالة الميكانيكية" in extract_text(mechanical_header):
-            for status in inspection.select(".web-text-end span .color_title"):
-                status_text = extract_text(status)
-                if status_text:
-                    mechanical_statuses.append(status_text)
-    return date_text, summary_text, mechanical_statuses
+        for item in inspection.select(".accordion-item"):
+            section_title = extract_text(item.select_one(".accordion-button"))
+            if not section_title:
+                continue
+            section_data: Dict[str, str] = {}
+            for row in item.select(".accordion-body > div"):
+                label = extract_text(row.select_one("span.color_subtitle"))
+                img = row.select_one("img")
+                if not label or not img:
+                    continue
+                src = img.get("src", "")
+                if "2020823123832523.png" in src:
+                    section_data[label] = "yes"
+            if section_data:
+                report[section_title] = section_data
+    return date_text, summary_text, report
 
 
 def parse_description(soup: BeautifulSoup) -> str:
@@ -190,6 +199,13 @@ def file_extension_from_url(url: str) -> str:
     return ext if ext else ".jpg"
 
 
+def slugify_column(text: str) -> str:
+    text = normalize_text(text)
+    text = re.sub(r"[\s/]+", "_", text)
+    text = re.sub(r"[^\w\u0600-\u06FF_]+", "", text, flags=re.UNICODE)
+    return text.strip("_")
+
+
 def download_image(session: requests.Session, url: str) -> bytes:
     resp = session.get(url, timeout=30)
     resp.raise_for_status()
@@ -209,7 +225,7 @@ def scrape_detail(session: requests.Session, url: str) -> Dict[str, object]:
     price, monthly = parse_price_block(soup)
     specs = parse_specs(soup)
     features = parse_features(soup)
-    inspection_date, inspection_summary, mechanical_statuses = parse_inspection(soup)
+    inspection_date, inspection_summary, inspection_report = parse_inspection(soup)
     description = parse_description(soup)
     images = extract_image_urls(soup)
 
@@ -223,7 +239,7 @@ def scrape_detail(session: requests.Session, url: str) -> Dict[str, object]:
         "features": features,
         "inspection_date": inspection_date,
         "inspection_summary": inspection_summary,
-        "mechanical_statuses": mechanical_statuses,
+        "inspection_report": inspection_report,
         "description": description,
         "image_urls": images,
     }
@@ -238,11 +254,21 @@ def scrape_all() -> None:
     s3_prefix = f"motorgy/year={year}/month={month}/day={day}"
     max_pages_env = get_env("MAX_PAGES", required=False, default=None)
     max_pages = int(max_pages_env) if max_pages_env else None
+    start_page_env = get_env("START_PAGE", required=False, default=None)
+    end_page_env = get_env("END_PAGE", required=False, default=None)
+    start_page = int(start_page_env) if start_page_env else 1
+    end_page = int(end_page_env) if end_page_env else None
     delay_seconds = float(get_env("REQUEST_DELAY_SECONDS", required=False, default="1.0"))
 
     print("Starting Motorgy scrape...")
     logger.info("Run date (UTC): %s-%s-%s", year, month, day)
-    logger.info("Max pages: %s | Delay seconds: %s", max_pages or "ALL", delay_seconds)
+    logger.info(
+        "Max pages: %s | Start page: %s | End page: %s | Delay seconds: %s",
+        max_pages or "ALL",
+        start_page,
+        end_page or "AUTO",
+        delay_seconds,
+    )
 
     s3_client = boto3.client(
         "s3",
@@ -265,14 +291,22 @@ def scrape_all() -> None:
     total_pages = parse_total_pages(first_resp.text) or 1
     if max_pages:
         total_pages = min(total_pages, max_pages)
+    if end_page:
+        total_pages = min(total_pages, end_page)
+    if start_page < 1:
+        start_page = 1
+    if start_page > total_pages:
+        logger.warning("Start page (%s) exceeds total pages (%s). Nothing to do.", start_page, total_pages)
+        return
     print(f"Total pages detected: {total_pages}")
     logger.info("Total pages detected: %s", total_pages)
 
-    first_links = parse_listing_page(first_resp.text)
-    all_links.extend(first_links)
-    logger.info("Page 1 links: %s", len(first_links))
+    if start_page <= 1:
+        first_links = parse_listing_page(first_resp.text)
+        all_links.extend(first_links)
+        logger.info("Page 1 links: %s", len(first_links))
 
-    page = 2
+    page = max(2, start_page)
     while page <= total_pages:
         page_url = f"{USED_CARS_URL}?pn={page}"
         resp = session.get(page_url, timeout=30)
@@ -328,10 +362,18 @@ def scrape_all() -> None:
             **data,
             "specs_json": json.dumps(data.get("specs", {}), ensure_ascii=False),
             "features_json": json.dumps(data.get("features", {}), ensure_ascii=False),
-            "mechanical_statuses_json": json.dumps(data.get("mechanical_statuses", []), ensure_ascii=False),
+            "inspection_report_json": json.dumps(data.get("inspection_report", {}), ensure_ascii=False),
             "s3_images_paths": json.dumps(s3_image_paths, ensure_ascii=False),
             "images_count": len(s3_image_paths),
         }
+
+        inspection_report = data.get("inspection_report", {}) or {}
+        for section_name, items in inspection_report.items():
+            section_key = slugify_column(section_name)
+            for item_name, value in items.items():
+                item_key = slugify_column(item_name)
+                col_name = f"inspection_{section_key}__{item_key}"
+                row[col_name] = value
         results.append(row)
 
         if idx % 10 == 0:

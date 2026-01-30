@@ -1,4 +1,4 @@
-name: Scrape Motorgy Monthly (Part 1)
+name: Scrape Motorgy Monthly (Part 4)
 
 on:
   schedule:
@@ -13,8 +13,8 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       S3_BUCKET: ${{ secrets.S3_BUCKET }}
       REQUEST_DELAY_SECONDS: "1.0"
-      START_PAGE: "1"
-      END_PAGE: "36"
+      START_PAGE: "109"
+      END_PAGE: "143"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
