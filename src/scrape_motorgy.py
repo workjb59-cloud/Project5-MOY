@@ -251,7 +251,10 @@ def scrape_all() -> None:
     year = run_date.strftime("%Y")
     month = run_date.strftime("%m")
     day = run_date.strftime("%d")
+    part_label = get_env("PART_LABEL", required=False, default=None)
     s3_prefix = f"motorgy/year={year}/month={month}/day={day}"
+    if part_label:
+        s3_prefix = f"{s3_prefix}/part={part_label}"
     max_pages_env = get_env("MAX_PAGES", required=False, default=None)
     max_pages = int(max_pages_env) if max_pages_env else None
     start_page_env = get_env("START_PAGE", required=False, default=None)
@@ -263,10 +266,11 @@ def scrape_all() -> None:
     print("Starting Motorgy scrape...")
     logger.info("Run date (UTC): %s-%s-%s", year, month, day)
     logger.info(
-        "Max pages: %s | Start page: %s | End page: %s | Delay seconds: %s",
+        "Max pages: %s | Start page: %s | End page: %s | Part: %s | Delay seconds: %s",
         max_pages or "ALL",
         start_page,
         end_page or "AUTO",
+        part_label or "none",
         delay_seconds,
     )
 
@@ -386,7 +390,8 @@ def scrape_all() -> None:
     output_dir = os.path.join(os.getcwd(), "output")
     os.makedirs(output_dir, exist_ok=True)
     timestamp = run_date.strftime("%Y%m%d")
-    excel_name = f"motorgy_used_cars_{timestamp}.xlsx"
+    part_suffix = f"_part-{part_label}" if part_label else ""
+    excel_name = f"motorgy_used_cars_{timestamp}{part_suffix}.xlsx"
     excel_path = os.path.join(output_dir, excel_name)
     df.to_excel(excel_path, index=False)
     print(f"Excel saved: {excel_path}")

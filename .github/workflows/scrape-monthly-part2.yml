@@ -11,10 +11,11 @@ jobs:
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      S3_BUCKET: ${{ secrets.S3_BUCKET_NAME }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
       REQUEST_DELAY_SECONDS: "1.0"
       START_PAGE: "37"
       END_PAGE: "72"
+      PART_LABEL: "2"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
