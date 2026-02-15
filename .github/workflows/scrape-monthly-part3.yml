@@ -13,8 +13,8 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       S3_BUCKET: ${{ secrets.S3_BUCKET_NAME }}
       REQUEST_DELAY_SECONDS: "1.0"
-      START_PAGE: "73"
-      END_PAGE: "108"
+      START_PAGE: "77"
+      END_PAGE: "114"
       PART_LABEL: "3"
     steps:
       - name: Checkout
