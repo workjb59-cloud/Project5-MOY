@@ -158,6 +158,18 @@ def parse_description(soup: BeautifulSoup) -> str:
     return extract_text(soup.select_one("#_description .description"))
 
 
+def parse_seller_phone(soup: BeautifulSoup) -> str:
+    """Extract seller phone number from the call button."""
+    phone = ""
+    # Look for the call button with tel: href
+    call_button = soup.select_one("a.btnCall[href^='tel:']")
+    if call_button:
+        href = call_button.get("href", "")
+        # Extract phone number from tel:60057204 format
+        phone = href.replace("tel:", "").strip()
+    return phone
+
+
 def parse_basic_info(soup: BeautifulSoup) -> Tuple[str, str, str]:
     title = extract_text(soup.select_one(".side-box h5"))
     year = ""
@@ -227,6 +239,7 @@ def scrape_detail(session: requests.Session, url: str) -> Dict[str, object]:
     features = parse_features(soup)
     inspection_date, inspection_summary, inspection_report = parse_inspection(soup)
     description = parse_description(soup)
+    seller_phone = parse_seller_phone(soup)
     images = extract_image_urls(soup)
 
     return {
@@ -235,6 +248,7 @@ def scrape_detail(session: requests.Session, url: str) -> Dict[str, object]:
         "mileage": mileage,
         "price": price,
         "monthly_estimate": monthly,
+        "seller_phone_number": seller_phone,
         "specs": specs,
         "features": features,
         "inspection_date": inspection_date,
